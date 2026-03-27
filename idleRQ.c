@@ -4,3 +4,11 @@
 #include <windows.h>
 #include <ws2tcpip.h>
 
+/** declare variable wsa **/
+WSADATA wsa;
+
+if (WSAStartup(MAKEWORD(2,2),&wsa) != 0) {
+printf("Failed. Error Code : %d",WSAGetLastError());
+return 1;
+}
+else printf("\nWINSOCK INITIALIZED");

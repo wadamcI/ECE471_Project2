@@ -1,4 +1,4 @@
-  #include <stdio.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -6,8 +6,9 @@
 #include <windows.h>
 #include <ws2tcpip.h>
 
+#pragma comment(lib, "ws2_32.lib")
+
 #define PACKETSIZE 1024
-#define MaxDelay 200
 
 typedef struct {
     uint32_t seq;
@@ -44,6 +45,7 @@ int main(void)
     uint32_t seq = 0;
     uint32_t ack = 0;
     int numPackets = 0;
+    u_long noBlock = 1;
 
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf("Failed. Error Code : %d", WSAGetLastError());
@@ -78,13 +80,6 @@ int main(void)
     fclose(fp);
 
     numPackets = (fileLen + PACKETSIZE - 1) / PACKETSIZE;
-
-    //char *buffer = NULL;
-    //char packet[PACKETSIZE];
-    //int recv_len;
-    //int waiting_for_data = 1;
-    //int fileLen = PACKETSIZE;
-    //u_long noBlock = 1;
 
     /***** CREATE CLIENT SOCKET ****/
     if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET) {
@@ -140,40 +135,51 @@ int main(void)
         if(dataLen == 0)
             dataLen = PACKETSIZE;
 
-        /*** Initialize Start Time ****************/
-        QueryPerformanceCounter(&current);
-        StartACK = (uint64_t)current.QuadPart;
+        pkt.seq = seq;
+        memcpy(pkt.data, buffer + seq * PACKETSIZE, dataLen);
+
+        printf("Sending packet seq %u (size = %d)\n", seq, dataLen);
 
         while(1)
         {
-            AckPacket ackPkt;
-            int recv_len = recvfrom(s, (char*)&ackPkt, sizeof(ackPkt), 0, (struct sockaddr*)&si_other, &slen);
+            if(sendto(s, (char*)&pkt, sizeof(uint32_t) + dataLen, 0, (struct sockaddr*)&si_other, slen) == SOCKET_ERROR)
+                printf("sendto() failed: %d\n", WSAGetLastError());
 
-            if(recv_len == sizeof(AckPacket))
+            /*** Initialize Start Time ****************/
+            QueryPerformanceCounter(&current);
+            StartACK = (uint64_t)current.QuadPart;
+
+            while(1)
             {
-                if(ackPkt.ack == seq)
+                AckPacket ackPkt;
+                int recv_len = recvfrom(s, (char*)&ackPkt, sizeof(ackPkt), 0, (struct sockaddr*)&si_other, &slen);
+
+                if(recv_len == sizeof(AckPacket))
                 {
-                    printf("Received ACK for seq %u\n", seq);
+                    if(ackPkt.ack == seq)
+                    {
+                        printf("Received ACK for seq %u\n", seq);
+                        break;
+                    }
+
+                }
+
+                /*** Measure Elapsed Time ****************/
+                QueryPerformanceCounter(&current);
+                ElapsedACK = (uint64_t)current.QuadPart - StartACK;
+                printf(" ACK Elapsed time = ");
+                printf("%" PRIu64, ElapsedACK);
+
+                if (ElapsedACK > MaxDelay) {
+                    printf("Timeout for seq %u (elapsed ~%llu ms) - resending packet\n", seq, ElapsedACK);
                     break;
                 }
 
             }
 
-            /*** Measure Elapsed Time ****************/
-            QueryPerformanceCounter(&current);
-            ElapsedACK = (uint64_t)current.QuadPart - StartACK;
-            printf(" ACK Elapsed time = ");
-            printf("%" PRIu64, ElapsedACK);
-
-            if (ElapsedACK > MaxDelay) {
-                printf("Timeout for seq %u (elapsed ~%llu ms) - resending packet\n", seq, ElapsedACK);
-                break;
-            }
-
+            //if(recv_len == sizeof(AckPacket) && ackPkt.ack == seq)
+            //    break;
         }
-
-        if(recv_len == sizeof(AckPacket) && ackPck.ack = seq)
-            break;
     }
 
 
@@ -202,6 +208,8 @@ int main(void)
 
         }
     }*/
+
+    printf("All packets sent successfully.\n");
 
     free(buffer);
     closesocket(s);

@@ -97,14 +97,15 @@ int main() {
         unsigned char header = 0;
 
         //Packet number (7 bits)
-        header |= (packetNum & 0x7F) << 1;
+        //header |= (packetNum & 0x7F) << 1;
+        header = packetNum & 0x7F;
 
         //Fragment Flag (1 bit)
 
         if ((bytesSent + chunk) < fileLen)
-            header |= 0x01;
+            header |= 0x80;
         else
-            header |= 0x00;
+            header |= 0x7F;
 
         packet[0] = header;
 
@@ -120,7 +121,7 @@ int main() {
             exit(EXIT_FAILURE);
         }
 
-        printf("Sent packet #%d, size: %d, frag: %d\n", packetNum, chunk, header & 0x01);
+        printf("Sent packet #%d, size: %d, frag: %d\n", packetNum, chunk, header & 0x80 % 127);
 
         bytesSent = bytesSent + chunk;
         packetNum++;

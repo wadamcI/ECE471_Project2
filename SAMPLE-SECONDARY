@@ -1,0 +1,99 @@
+Starter Code(Sending whole image) Receiver code
+
+#define _CRT_SECURE_NO_WARNINGS
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <winsock2.h>
+#include <windows.h>
+#include <ws2tcpip.h>
+#define PACKETSIZE 1024
+#pragma comment(lib,"ws2_32.lib ")
+
+int main()
+{
+
+    /** declare variable wsa **/
+    WSADATA wsa;
+    struct sockaddr_in server, si_other; // ADDED SERVER,---------------------------
+    int recv_len;                        //ADEED------------------------ it wasn't declared
+    SOCKET s;
+    int slen = sizeof(si_other);
+    unsigned long fileLen = 1000000;      // length of image file
+    FILE* writefp;                         // file pointer
+    char* buffer;                    // pointer to character array
+
+
+
+    printf("\n****** INITIALIZING WINSOCK ***********");
+
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf("Failed. Error Code : %d", WSAGetLastError());
+        return 1;
+    }
+    else printf("\nWINSOCK INITIALIZED");
+
+    //int i=0;                        |
+    //while (i < fileLen) {           |
+    //    buffer[i] = packet[i];      | NOT USED FOR NOW----------------------
+    //    i += 1;                     |
+    //}//  while(byteCount < fileLen) |
+
+    /*****  CREATE SERVER SOCKET  ****/
+    if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET) {
+        printf("Could not create socket : %d", WSAGetLastError());
+    }
+    else printf("\nUDP SERVER SOCKET CREATED");
+
+    server.sin_addr.s_addr = INADDR_ANY; // or  INADDR_ANY
+    server.sin_family = AF_INET;
+    server.sin_port = htons(80);
+
+    /*****  BIND SOCKET  ****/
+    if (bind(s, (struct sockaddr*)&server, sizeof(server)) == SOCKET_ERROR) {
+        printf("Bind failed with error code : %d", WSAGetLastError());
+        exit(EXIT_FAILURE);
+    }
+    puts("\nSERVER SOCKET BIND SUCCESS");
+
+    /*****  WAIT FOR DATA  ****/
+    printf("\nWaiting for data...");
+
+    buffer = (char*)malloc((fileLen + 1));  //allocated mmmory
+
+    // allocate pointer to character array hold image //
+
+    //while (waiting for data) {-------------------------------commented out, I think this was suppose to be a comment
+    fflush(stdout);
+   // memset(packet, '\0', PACKETSIZE);  //clear buffer of previously received data --------------------------------
+
+    /********  RECEIVE DATA PACKET - blocking *************/
+    if ((recv_len = recvfrom(s, buffer, fileLen + 1, 0, (struct sockaddr*)&si_other, &slen)) == SOCKET_ERROR)
+    {
+       printf("recvfrom() failed with error code : %d", WSAGetLastError());
+       exit(EXIT_FAILURE);
+    }
+    else printf("\nSERVER Received packet IPaddr %s Port %d  ", inet_ntoa(si_other.sin_addr), ntohs(si_other.sin_port));
+
+
+
+    /*********** write contents of buffer to a file ************/
+    writefp = fopen("lena.jpg", "wb");
+    if (writefp == NULL)
+    {
+        printf("\nError Opening Image-write");
+        fclose(writefp);
+        exit(0);
+    }
+    else printf("\nfile opened for writing");
+    fwrite(buffer, fileLen, 1, writefp);
+    fclose(writefp);
+    printf("\nc SAVED image, press any key");
+
+    closesocket(s);
+    WSACleanup();
+
+
+#pragma once
+}

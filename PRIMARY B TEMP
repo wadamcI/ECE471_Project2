@@ -11,13 +11,6 @@
 #define PACKETSIZE 1024
 #define PAYLOADSIZE 1023
 
-
-//sin_family: address family - set to AF_INET for IPv4
-//sin_port : transport protocol port number
-//sin_addr : IN_ADDR structure - contains an IPv4 address
-//sin_zero[8] : Reserved for system use.Set the contents to zero(default)
-
-
 int main() {
 
     /** declare variable wsa **/
@@ -84,6 +77,12 @@ int main() {
     int bytesSent = 0;
     int packetNum = 0;
 
+    //Timer Variables
+    LARGE_INTEGER frequency, start, current;
+    double timeElapsed;
+
+    QueryPerformanceFrequency(&frequency);
+
     while (bytesSent < fileLen)
     {
         int chunk;
@@ -98,7 +97,6 @@ int main() {
         unsigned char header = 0;
 
         //Packet number (7 bits)
-        //header |= (packetNum & 0x7F) << 1;
         header = packetNum & 0x7F;
 
         //Fragment Flag (1 bit)
@@ -124,7 +122,12 @@ int main() {
 
         printf("Sent packet #%d, size: %d, frag: %d\n", packetNum, chunk, (header & 0x80) >> 7);
 
+        //WAITING FOR AN ACK
+
         int ackReceived = 0;
+
+        //Start Timer
+        QueryPerformanceCounter(&start);
 
         while (!ackReceived)
         {
@@ -139,6 +142,24 @@ int main() {
                     printf("Received ACK for packet #%d\n", ackNum);
                     ackReceived = 1;
                 }
+            }
+
+            //Check Timeout
+            QueryPerformanceCounter(&current);
+
+            timeElapsed = (double)(current.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart;
+
+            if (timeElapsed > 10000)
+            {
+                printf("Timeout for packet #%d, resending\n", packetNum);
+
+                if (sendto(s, (char*)packet, chunk + 1, 0, (struct sockaddr*)&si_other, slen) == SOCKET_ERROR)
+                {
+                    printf("sendto() failed with error code : %d", WSAGetLastError());
+                    exit(EXIT_FAILURE);
+                }
+
+                QueryPerformanceCounter(&start);
             }
         }
 

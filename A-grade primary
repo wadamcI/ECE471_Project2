@@ -1,0 +1,176 @@
+#define _CRT_SECURE_NO_WARNINGS
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <winsock2.h>
+#include <windows.h>
+#include <ws2tcpip.h>
+#pragma comment(lib,"ws2_32.lib")
+
+#define PACKETSIZE 1024
+#define PAYLOADSIZE 1023
+
+int main() {
+
+    /** declare variable wsa **/
+    WSADATA wsa;
+
+    printf("\n****** INITIALIZING WINSOCK ***********");
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf("Failed. Error Code : %d", WSAGetLastError());
+        return 1;
+    }
+    else printf("\nWINSOCK INITIALIZED");
+
+    //------------------------------------------------------------------------------------------------------------------------------
+
+     /**file variable **/
+    unsigned long fileLen;      // length of image file
+    FILE* fp;                         // file pointer
+    char* buffer;                    // pointer to character array
+
+    /***  OPEN IMAGE FILE AND COPY TO DATA STRUCTURE  ***/
+    fp = fopen("test.jpg", "rb");
+    if (fp == NULL) {
+        printf("\n Error Opening Image - read");
+        exit(0);
+    }
+
+    /*** ALLOCATE MEMORY (BUFFER) TO HOLD IMAGE *****/
+    fseek(fp, 0, SEEK_END);                    //go to EOF
+    fileLen = ftell(fp);                             // determine length
+    fseek(fp, 0, SEEK_SET);                  //reset fp
+    buffer = (char*)malloc(fileLen + 1);  //allocated memory
+
+    if (!buffer) {
+        printf("\n memory error allocating buffer");
+        fclose(fp);
+        return 1;
+    }
+
+    /*********  READ FILE DATA INTO BUFFER AND CLOSE FILE  *************/
+    fread(buffer, fileLen, 1, fp);
+    fclose(fp);
+
+    //-----------------------------------------------------------------------------------------------
+    struct sockaddr_in si_other;
+    SOCKET s;
+    int slen = sizeof(si_other);
+
+    /*****  CREATE CLIENT SOCKET  ****/
+    if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET) {
+        printf("Could not create socket : %d", WSAGetLastError());
+    }
+    printf("UDP CLIENT SOCKEET CREATED.\n");
+
+    /*****  INITIALIZE SOCKET STRUCT   - Non Blocking Client ****/
+    u_long noBlock = 1;
+    ioctlsocket(s, FIONBIO, &noBlock);
+    si_other.sin_addr.s_addr = inet_addr("192.168.24.5");
+    si_other.sin_family = AF_INET;
+    si_other.sin_port = htons(80);
+
+    unsigned char packet[PACKETSIZE];
+    unsigned char ackBuf[2];
+
+    int bytesSent = 0;
+    int packetNum = 0;
+
+    //Timer Variables
+    LARGE_INTEGER frequency, start, current;
+    double timeElapsed;
+
+    QueryPerformanceFrequency(&frequency);
+
+    while (bytesSent < fileLen)
+    {
+        int chunk;
+
+        if ((fileLen - bytesSent) > PAYLOADSIZE)
+            chunk = PAYLOADSIZE;
+        else
+            chunk = fileLen - bytesSent;
+
+        //HEADER
+
+        unsigned char header = 0;
+
+        //Packet number (7 bits)
+        header = packetNum & 0x7F;
+
+        //Fragment Flag (1 bit)
+
+        if ((bytesSent + chunk) < fileLen)
+            header |= 0x80;
+        else
+            header &= 0x7F;
+
+        packet[0] = header;
+
+        //PAYLOAD
+
+        memcpy(packet + 1, buffer + bytesSent, chunk);
+
+        //SENDING
+
+        if (sendto(s, (char*)packet, chunk + 1, 0, (struct sockaddr*)&si_other, slen) == SOCKET_ERROR)
+        {
+            printf("sendto() failed with error code : %d", WSAGetLastError());
+            exit(EXIT_FAILURE);
+        }
+
+        printf("Sent packet #%d, size: %d, frag: %d\n", packetNum, chunk, (header & 0x80) >> 7);
+
+        //WAITING FOR AN ACK
+
+        int ackReceived = 0;
+
+        //Start Timer
+        QueryPerformanceCounter(&start);
+
+        while (!ackReceived)
+        {
+            int recv_len = recvfrom(s, (char*)ackBuf, sizeof(ackBuf), 0, (struct sockaddr*)&si_other, &slen);
+
+            if (recv_len > 0)
+            {
+                int ackNum = ackBuf[0] & 0x7F;
+
+                if (ackNum == packetNum)
+                {
+                    printf("Received ACK for packet #%d\n", ackNum);
+                    printf("ACK Time: %0.2f ms\n", timeElapsed);
+                    ackReceived = 1;
+                }
+            }
+
+            //Check Timeout
+            QueryPerformanceCounter(&current);
+
+            timeElapsed = (double)(current.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart;
+
+            if (timeElapsed > 100)
+            {
+                printf("Timeout for packet #%d, resending\n", packetNum);
+
+                if (sendto(s, (char*)packet, chunk + 1, 0, (struct sockaddr*)&si_other, slen) == SOCKET_ERROR)
+                {
+                    printf("sendto() failed with error code : %d", WSAGetLastError());
+                    exit(EXIT_FAILURE);
+                }
+
+                QueryPerformanceCounter(&start);
+            }
+        }
+
+        bytesSent = bytesSent + chunk;
+        packetNum++;
+    }
+
+    free(buffer);
+    closesocket(s);
+    WSACleanup();
+    return 0;
+
+}

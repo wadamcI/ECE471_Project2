@@ -82,8 +82,6 @@ int main()
         int payloadSize = recv_len - 1;
         memcpy(buffer + seq * PAYLOAD_SIZE, pkt.payload, payloadSize);
         currentOffset += payloadSize;
-        // memcpy(buffer + offset, pkt.payload, recv_len - 1); // minus header byte
-        // totalBytes += recv_len - 1;
 
         printf("Received packet %d, size %d, moreFragments=%d\n", seq, recv_len - 1, moreFragments);
         packetCount++;

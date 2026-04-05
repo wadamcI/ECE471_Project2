@@ -12,17 +12,18 @@
 #include <time.h>
 
 #define DEFAULT_PORT 5001
-#define DEFAULT_COUNT 1000
 #define DEFAULT_TIMEOUT_MS 1000
 
 #define TOTAL_DATA_SIZE 10000
 #define MAX_FRAGMENT_PAYLOAD 1400
 
+#define MESSAGE_COUNT 625
+
 typedef struct __attribute__((packed)) {
-    uint32_t msg_id;         // logical message number
-    uint16_t frag_idx;       // fragment index
-    uint16_t frag_count;     // total number of fragments
-    uint16_t payload_len;    // bytes in this fragment
+    uint32_t msg_id;
+    uint16_t frag_idx;
+    uint16_t frag_count;
+    uint16_t payload_len;
 } FragmentHeader;
 
 typedef struct __attribute__((packed)) {
@@ -44,32 +45,34 @@ static uint64_t now_us(void) {
 int main(int argc, char *argv[]) {
     const char *server_ip = "127.0.0.1";
     int port = DEFAULT_PORT;
-    int count = DEFAULT_COUNT;
     int timeout_ms = DEFAULT_TIMEOUT_MS;
 
     if (argc >= 2) server_ip = argv[1];
     if (argc >= 3) port = atoi(argv[2]);
-    if (argc >= 4) count = atoi(argv[3]);
-    if (argc >= 5) timeout_ms = atoi(argv[4]);
-
-    if (count <= 0) {
-        fprintf(stderr, "count must be > 0\n");
-        return 1;
-    }
+    if (argc >= 4) timeout_ms = atoi(argv[3]);
 
     const uint16_t frag_count =
         (TOTAL_DATA_SIZE + MAX_FRAGMENT_PAYLOAD - 1) / MAX_FRAGMENT_PAYLOAD;
+    const int total_rtt_samples = MESSAGE_COUNT * frag_count;
 
-    uint64_t *rtt_us = malloc((size_t)count * sizeof(uint64_t));
-    if (!rtt_us) {
-        perror("malloc");
+    uint64_t *frag_rtt_us = malloc((size_t)total_rtt_samples * sizeof(uint64_t));
+    if (!frag_rtt_us) {
+        perror("malloc frag_rtt_us");
+        return 1;
+    }
+
+    uint64_t *msg_total_us = malloc((size_t)MESSAGE_COUNT * sizeof(uint64_t));
+    if (!msg_total_us) {
+        perror("malloc msg_total_us");
+        free(frag_rtt_us);
         return 1;
     }
 
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         perror("socket");
-        free(rtt_us);
+        free(frag_rtt_us);
+        free(msg_total_us);
         return 1;
     }
 
@@ -83,7 +86,8 @@ int main(int argc, char *argv[]) {
     if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
         perror("setsockopt SO_RCVTIMEO");
         close(sockfd);
-        free(rtt_us);
+        free(frag_rtt_us);
+        free(msg_total_us);
         return 1;
     }
 
@@ -95,14 +99,16 @@ int main(int argc, char *argv[]) {
     if (inet_pton(AF_INET, server_ip, &servaddr.sin_addr) != 1) {
         fprintf(stderr, "invalid IP address: %s\n", server_ip);
         close(sockfd);
-        free(rtt_us);
+        free(frag_rtt_us);
+        free(msg_total_us);
         return 1;
     }
 
     if (connect(sockfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
         perror("connect");
         close(sockfd);
-        free(rtt_us);
+        free(frag_rtt_us);
+        free(msg_total_us);
         return 1;
     }
 
@@ -111,11 +117,12 @@ int main(int argc, char *argv[]) {
         message[i] = (char)('A' + (i % 26));
     }
 
-    int received = 0;
+    int sample_idx = 0;
     int timeouts = 0;
+    int failed_messages = 0;
 
-    for (int msg = 0; msg < count; msg++) {
-        uint64_t t0 = now_us();
+    for (uint32_t msg = 0; msg < MESSAGE_COUNT; msg++) {
+        uint64_t msg_t0 = now_us();
         int failed = 0;
 
         for (uint16_t frag = 0; frag < frag_count; frag++) {
@@ -129,7 +136,7 @@ int main(int argc, char *argv[]) {
                 : (TOTAL_DATA_SIZE - (int)offset)
             );
 
-            pkt.hdr.msg_id = (uint32_t)msg;
+            pkt.hdr.msg_id = msg;
             pkt.hdr.frag_idx = frag;
             pkt.hdr.frag_count = frag_count;
             pkt.hdr.payload_len = chunk;
@@ -138,6 +145,8 @@ int main(int argc, char *argv[]) {
             size_t send_len = sizeof(FragmentHeader) + chunk;
 
             for (;;) {
+                uint64_t t0 = now_us();
+
                 ssize_t sent = send(sockfd, &pkt, send_len, 0);
                 if (sent < 0) {
                     perror("send");
@@ -147,10 +156,12 @@ int main(int argc, char *argv[]) {
 
                 AckPacket ack;
                 ssize_t n = recv(sockfd, &ack, sizeof(ack), 0);
+                uint64_t t1 = now_us();
+
                 if (n < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
                         timeouts++;
-                        continue; // resend same fragment
+                        continue;   // resend same fragment
                     }
                     perror("recv");
                     failed = 1;
@@ -158,61 +169,79 @@ int main(int argc, char *argv[]) {
                 }
 
                 if ((size_t)n == sizeof(ack) &&
-                    ack.msg_id == (uint32_t)msg &&
+                    ack.msg_id == msg &&
                     ack.frag_idx == frag) {
-                    break; // next fragment
+                    frag_rtt_us[sample_idx++] = t1 - t0;
+                    break;
                 }
+
+                // unexpected ACK, keep waiting/resending
             }
 
-            if (failed) break;
+            if (failed) {
+                break;
+            }
         }
 
-        uint64_t t1 = now_us();
+        uint64_t msg_t1 = now_us();
+        msg_total_us[msg] = failed ? 0 : (msg_t1 - msg_t0);
 
-        if (!failed) {
-            rtt_us[msg] = t1 - t0;
-            received++;
-        } else {
-            rtt_us[msg] = 0;
+        if (failed) {
+            failed_messages++;
+            while (sample_idx < (int)((msg + 1) * frag_count)) {
+                frag_rtt_us[sample_idx++] = 0;
+            }
         }
     }
 
-    uint64_t min_us = UINT64_MAX, max_us = 0, sum_us = 0;
-    int valid = 0;
+    uint64_t min_frag = UINT64_MAX, max_frag = 0, sum_frag = 0;
+    int valid_frag = 0;
 
-    for (int i = 0; i < count; i++) {
-        if (rtt_us[i] == 0) continue;
-        if (rtt_us[i] < min_us) min_us = rtt_us[i];
-        if (rtt_us[i] > max_us) max_us = rtt_us[i];
-        sum_us += rtt_us[i];
-        valid++;
+    for (int i = 0; i < total_rtt_samples; i++) {
+        if (frag_rtt_us[i] == 0) continue;
+        if (frag_rtt_us[i] < min_frag) min_frag = frag_rtt_us[i];
+        if (frag_rtt_us[i] > max_frag) max_frag = frag_rtt_us[i];
+        sum_frag += frag_rtt_us[i];
+        valid_frag++;
     }
 
-    printf("Logical messages sent : %d\n", count);
-    printf("Message size (bytes)  : %d\n", TOTAL_DATA_SIZE);
-    printf("Fragments/message     : %u\n", frag_count);
-    printf("Messages received     : %d\n", received);
-    printf("Timeouts              : %d\n", timeouts);
+    uint64_t min_msg = UINT64_MAX, max_msg = 0, sum_msg = 0;
+    int valid_msg = 0;
 
-    if (valid > 0) {
-        printf("RTT min (us)          : %" PRIu64 "\n", min_us);
-        printf("RTT max (us)          : %" PRIu64 "\n", max_us);
-        printf("RTT avg (us)          : %.2f\n", (double)sum_us / (double)valid);
-    } else {
-        printf("No valid RTT samples collected.\n");
+    for (int i = 0; i < MESSAGE_COUNT; i++) {
+        if (msg_total_us[i] == 0) continue;
+        if (msg_total_us[i] < min_msg) min_msg = msg_total_us[i];
+        if (msg_total_us[i] > max_msg) max_msg = msg_total_us[i];
+        sum_msg += msg_total_us[i];
+        valid_msg++;
     }
 
-    FILE *fp = fopen("rtt_frag_10k.csv", "w");
-    if (fp) {
-        fprintf(fp, "msg_id,rtt_us\n");
-        for (int i = 0; i < count; i++) {
-            fprintf(fp, "%d,%" PRIu64 "\n", i, rtt_us[i]);
-        }
-        fclose(fp);
-        printf("Saved samples to rtt_frag_10k.csv\n");
+    printf("Messages sent              : %d\n", MESSAGE_COUNT);
+    printf("Message size (bytes)       : %d\n", TOTAL_DATA_SIZE);
+    printf("Fragments per message      : %u\n", frag_count);
+    printf("Fragment RTT samples       : %d\n", total_rtt_samples);
+    printf("Failed messages            : %d\n", failed_messages);
+    printf("Timeouts                   : %d\n\n", timeouts);
+
+    if (valid_frag > 0) {
+        printf("Fragment RTT min (us)      : %" PRIu64 "\n", min_frag);
+        printf("Fragment RTT max (us)      : %" PRIu64 "\n", max_frag);
+        printf("Fragment RTT avg (us)      : %.2f\n\n", (double)sum_frag / valid_frag);
+    }
+
+    if (valid_msg > 0) {
+        printf("Message total min (us)     : %" PRIu64 "\n", min_msg);
+        printf("Message total max (us)     : %" PRIu64 "\n", max_msg);
+        printf("Message total avg (us)     : %.2f\n\n", (double)sum_msg / valid_msg);
+    }
+
+    printf("Fragment RTT samples (us):\n");
+    for (int i = 0; i < total_rtt_samples; i++) {
+        printf("%" PRIu64 "\n", frag_rtt_us[i]);
     }
 
     close(sockfd);
-    free(rtt_us);
+    free(frag_rtt_us);
+    free(msg_total_us);
     return 0;
 }

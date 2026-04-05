@@ -11,35 +11,34 @@
 #include <sys/time.h>
 #include <time.h>
 
-#define PAYLOAD_SIZE 64
 #define DEFAULT_PORT 5001
-#define DEFAULT_COUNT 2000
+#define DEFAULT_COUNT 1000
 #define DEFAULT_TIMEOUT_MS 1000
 
-typedef struct {
-    uint32_t seq;
-    char payload[PAYLOAD_SIZE];
-} Packet;
+#define TOTAL_DATA_SIZE 10000
+#define MAX_FRAGMENT_PAYLOAD 1400
 
-typedef struct {
-    uint32_t seq;
-} Ack;
+typedef struct __attribute__((packed)) {
+    uint32_t msg_id;         // logical message number
+    uint16_t frag_idx;       // fragment index
+    uint16_t frag_count;     // total number of fragments
+    uint16_t payload_len;    // bytes in this fragment
+} FragmentHeader;
+
+typedef struct __attribute__((packed)) {
+    FragmentHeader hdr;
+    char payload[MAX_FRAGMENT_PAYLOAD];
+} FragmentPacket;
+
+typedef struct __attribute__((packed)) {
+    uint32_t msg_id;
+    uint16_t frag_idx;
+} AckPacket;
 
 static uint64_t now_us(void) {
-#if defined(__APPLE__)
-    // CLOCK_MONOTONIC is available on modern macOS
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-#elif defined(CLOCK_MONOTONIC_RAW)
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-#endif
 }
 
 int main(int argc, char *argv[]) {
@@ -58,6 +57,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    const uint16_t frag_count =
+        (TOTAL_DATA_SIZE + MAX_FRAGMENT_PAYLOAD - 1) / MAX_FRAGMENT_PAYLOAD;
+
     uint64_t *rtt_us = malloc((size_t)count * sizeof(uint64_t));
     if (!rtt_us) {
         perror("malloc");
@@ -71,7 +73,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Optional: larger buffers, not critical here
     int bufsize = 1 << 20;
     setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
     setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
@@ -98,7 +99,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // connect() on UDP is useful: lets us use send/recv and filters other sources
     if (connect(sockfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
         perror("connect");
         close(sockfd);
@@ -106,45 +106,75 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    Packet pkt;
-    Ack ack;
-    memset(&pkt, 0, sizeof(pkt));
+    char message[TOTAL_DATA_SIZE];
+    for (int i = 0; i < TOTAL_DATA_SIZE; i++) {
+        message[i] = (char)('A' + (i % 26));
+    }
 
     int received = 0;
     int timeouts = 0;
 
-    for (int i = 0; i < count; i++) {
-        pkt.seq = (uint32_t)i;
-
+    for (int msg = 0; msg < count; msg++) {
         uint64_t t0 = now_us();
+        int failed = 0;
 
-        ssize_t sent = send(sockfd, &pkt, sizeof(pkt), 0);
-        if (sent < 0) {
-            perror("send");
-            rtt_us[i] = 0;
-            continue;
+        for (uint16_t frag = 0; frag < frag_count; frag++) {
+            FragmentPacket pkt;
+            memset(&pkt, 0, sizeof(pkt));
+
+            size_t offset = (size_t)frag * MAX_FRAGMENT_PAYLOAD;
+            uint16_t chunk = (uint16_t)(
+                (TOTAL_DATA_SIZE - (int)offset > MAX_FRAGMENT_PAYLOAD)
+                ? MAX_FRAGMENT_PAYLOAD
+                : (TOTAL_DATA_SIZE - (int)offset)
+            );
+
+            pkt.hdr.msg_id = (uint32_t)msg;
+            pkt.hdr.frag_idx = frag;
+            pkt.hdr.frag_count = frag_count;
+            pkt.hdr.payload_len = chunk;
+            memcpy(pkt.payload, message + offset, chunk);
+
+            size_t send_len = sizeof(FragmentHeader) + chunk;
+
+            for (;;) {
+                ssize_t sent = send(sockfd, &pkt, send_len, 0);
+                if (sent < 0) {
+                    perror("send");
+                    failed = 1;
+                    break;
+                }
+
+                AckPacket ack;
+                ssize_t n = recv(sockfd, &ack, sizeof(ack), 0);
+                if (n < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        timeouts++;
+                        continue; // resend same fragment
+                    }
+                    perror("recv");
+                    failed = 1;
+                    break;
+                }
+
+                if ((size_t)n == sizeof(ack) &&
+                    ack.msg_id == (uint32_t)msg &&
+                    ack.frag_idx == frag) {
+                    break; // next fragment
+                }
+            }
+
+            if (failed) break;
         }
 
-        ssize_t n = recv(sockfd, &ack, sizeof(ack), 0);
         uint64_t t1 = now_us();
 
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                timeouts++;
-            } else {
-                perror("recv");
-            }
-            rtt_us[i] = 0;
-            continue;
+        if (!failed) {
+            rtt_us[msg] = t1 - t0;
+            received++;
+        } else {
+            rtt_us[msg] = 0;
         }
-
-        if ((size_t)n != sizeof(ack) || ack.seq != (uint32_t)i) {
-            rtt_us[i] = 0;
-            continue;
-        }
-
-        rtt_us[i] = t1 - t0;
-        received++;
     }
 
     uint64_t min_us = UINT64_MAX, max_us = 0, sum_us = 0;
@@ -158,26 +188,28 @@ int main(int argc, char *argv[]) {
         valid++;
     }
 
-    printf("Packets requested : %d\n", count);
-    printf("ACKs received     : %d\n", received);
-    printf("Timeouts/errors   : %d\n", timeouts + (count - received - timeouts));
+    printf("Logical messages sent : %d\n", count);
+    printf("Message size (bytes)  : %d\n", TOTAL_DATA_SIZE);
+    printf("Fragments/message     : %u\n", frag_count);
+    printf("Messages received     : %d\n", received);
+    printf("Timeouts              : %d\n", timeouts);
+
     if (valid > 0) {
-        printf("RTT min (us)      : %" PRIu64 "\n", min_us);
-        printf("RTT max (us)      : %" PRIu64 "\n", max_us);
-        printf("RTT avg (us)      : %.2f\n", (double)sum_us / (double)valid);
+        printf("RTT min (us)          : %" PRIu64 "\n", min_us);
+        printf("RTT max (us)          : %" PRIu64 "\n", max_us);
+        printf("RTT avg (us)          : %.2f\n", (double)sum_us / (double)valid);
     } else {
         printf("No valid RTT samples collected.\n");
     }
 
-    // Optional CSV dump after measurement loop
-    FILE *fp = fopen("rtt_samples.csv", "w");
+    FILE *fp = fopen("rtt_frag_10k.csv", "w");
     if (fp) {
-        fprintf(fp, "seq,rtt_us\n");
+        fprintf(fp, "msg_id,rtt_us\n");
         for (int i = 0; i < count; i++) {
             fprintf(fp, "%d,%" PRIu64 "\n", i, rtt_us[i]);
         }
         fclose(fp);
-        printf("Saved samples to rtt_samples.csv\n");
+        printf("Saved samples to rtt_frag_10k.csv\n");
     }
 
     close(sockfd);

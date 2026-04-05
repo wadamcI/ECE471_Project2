@@ -82,8 +82,6 @@ int main(int argc, char *argv[]) {
     ReassemblyBuffer rb;
     reset_buffer(&rb);
 
-    printf("UDP fragmented server listening on port %d\n", port);
-
     for (;;) {
         FragmentPacket pkt;
         ssize_t n = recvfrom(sockfd, &pkt, sizeof(pkt), 0,
@@ -103,20 +101,12 @@ int main(int argc, char *argv[]) {
         uint16_t frag_count = pkt.hdr.frag_count;
         uint16_t payload_len = pkt.hdr.payload_len;
 
-        if (frag_count == 0 || frag_count > MAX_FRAGMENTS) {
-            continue;
-        }
-        if (frag_idx >= frag_count) {
-            continue;
-        }
-        if (payload_len > MAX_FRAGMENT_PAYLOAD) {
-            continue;
-        }
+        if (frag_count == 0 || frag_count > MAX_FRAGMENTS) continue;
+        if (frag_idx >= frag_count) continue;
+        if (payload_len > MAX_FRAGMENT_PAYLOAD) continue;
 
         size_t expected_len = sizeof(FragmentHeader) + payload_len;
-        if ((size_t)n != expected_len) {
-            continue;
-        }
+        if ((size_t)n != expected_len) continue;
 
         if (!rb.active || rb.current_msg_id != msg_id) {
             reset_buffer(&rb);
@@ -125,9 +115,7 @@ int main(int argc, char *argv[]) {
             rb.frag_count = frag_count;
         }
 
-        if (frag_count != rb.frag_count) {
-            continue;
-        }
+        if (frag_count != rb.frag_count) continue;
 
         size_t offset = (size_t)frag_idx * MAX_FRAGMENT_PAYLOAD;
         if (offset + payload_len <= TOTAL_DATA_SIZE) {
@@ -150,8 +138,6 @@ int main(int argc, char *argv[]) {
         }
 
         if (rb.received_count == rb.frag_count) {
-            printf("Reassembled message %" PRIu32 " (%d bytes, %u fragments)\n",
-                   rb.current_msg_id, TOTAL_DATA_SIZE, rb.frag_count);
             reset_buffer(&rb);
         }
     }
